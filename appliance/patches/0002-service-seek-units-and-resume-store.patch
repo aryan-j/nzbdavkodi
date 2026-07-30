@@ -1,0 +1,389 @@
+--- backups/nzbdav-seek-ms-fix-20260730/service.py.orig	2026-07-30 13:08:54.024504400 +1000
++++ addons/plugin.video.nzbdav/service.py	2026-07-30 13:57:31.743872100 +1000
+@@ -3,9 +3,11 @@
+ 
+ """NZB-DAV background service — hosts stream proxy and monitors playback."""
+ 
++import json
+ import os
+ import sys
+ import threading
++import time as _time
+ from enum import Enum
+ 
+ # Add resources/lib/ to sys.path (same as addon.py)
+@@ -17,6 +19,7 @@
+ import xbmc  # noqa: E402
+ import xbmcaddon  # noqa: E402
+ import xbmcgui  # noqa: E402
++import xbmcvfs  # noqa: E402
+ from resources.lib.http_util import notify as _notify  # noqa: E402
+ from resources.lib.stream_proxy import StreamProxy  # noqa: E402
+ 
+@@ -26,6 +29,8 @@
+ _PROP_ACTIVE = "nzbdav.active"
+ _PROP_PROXY_PORT = "nzbdav.proxy_port"
+ _PROP_PROXY_TOKEN = "nzbdav.proxy_token"
++_PROP_RESUME_POSITION = "nzbdav.resume_position"
++_PROP_CONTENT_KEY = "nzbdav.content_key"
+ 
+ _HOME_WINDOW = xbmcgui.Window(10000)
+ _PLAYER_RUNTIME_ERRORS = (
+@@ -36,6 +41,70 @@
+     ValueError,
+ )
+ 
++# Resume support.
++#
++# Kodi's native resume cannot work for these streams: every play mints a
++# fresh random proxy token (and the proxy's ephemeral port changes each
++# Kodi run), so Kodi keys its resume bookmark to a URL it will never see
++# again. Each play therefore leaves an orphaned bookmark and always starts
++# at 0. Instead of fighting that, the service keeps its own resume store
++# keyed by the release title, which is stable for a given episode/movie
++# file across plays *and* across Kodi restarts.
++_RESUME_STORE_FILE = "resume.json"
++# Below this many seconds there is nothing worth resuming.
++_RESUME_MIN_SECONDS = 30.0
++# At/after this fraction the item counts as finished, so the entry is
++# dropped rather than resuming a few seconds before the credits end.
++_RESUME_NEAR_END_FRACTION = 0.95
++# Bound the store so it cannot grow without limit.
++_RESUME_STORE_MAX_ITEMS = 200
++# Persist at most this often while playing (tick runs at ~1 Hz).
++_RESUME_SAVE_INTERVAL_SECONDS = 10.0
++
++
++def _resume_store_path():
++    """Return the on-disk path of the resume store."""
++    folder = xbmcvfs.translatePath(
++        "special://profile/addon_data/plugin.video.nzbdav/"
++    )
++    return os.path.join(folder, _RESUME_STORE_FILE)
++
++
++def _resume_store_load():
++    """Return the resume store's items mapping, or {} when unavailable."""
++    try:
++        with open(_resume_store_path(), "r", encoding="utf-8") as handle:
++            data = json.load(handle)
++    except (OSError, ValueError):
++        # Missing or corrupt store is not an error — resume is best-effort.
++        return {}
++    items = data.get("items") if isinstance(data, dict) else None
++    return items if isinstance(items, dict) else {}
++
++
++def _resume_store_save(items):
++    """Write the resume store atomically, trimming the oldest entries."""
++    if len(items) > _RESUME_STORE_MAX_ITEMS:
++        newest = sorted(
++            items.items(),
++            key=lambda item: item[1].get("updated", 0) if isinstance(item[1], dict) else 0,
++            reverse=True,
++        )
++        items = dict(newest[:_RESUME_STORE_MAX_ITEMS])
++    path = _resume_store_path()
++    temp_path = path + ".tmp"
++    try:
++        os.makedirs(os.path.dirname(path), exist_ok=True)
++        with open(temp_path, "w", encoding="utf-8") as handle:
++            json.dump({"version": 1, "items": items}, handle)
++        # Atomic replace so a crash mid-write cannot truncate the store.
++        os.replace(temp_path, path)
++    except OSError as error:
++        xbmc.log(
++            "NZB-DAV: Failed to write resume store: {}".format(error),
++            xbmc.LOGWARNING,
++        )
++
+ 
+ class PlaybackState(Enum):
+     """State machine for NzbdavPlayer.
+@@ -83,9 +152,63 @@
+         self._retry_count = 0
+         self._av_started = False
+         self._play_time = 0.0
++        self._resume_position = 0.0
++        self._total_time = 0.0
++        self._resume_saved_at = 0.0
++        self._resume_key = ""
+         self._monitor = xbmc.Monitor()
+         self._proxy = proxy
+ 
++    def _resume_lookup(self, key):
++        """Return a stored resume position for ``key``, else 0.0."""
++        if not key:
++            return 0.0
++        entry = _resume_store_load().get(key)
++        if not isinstance(entry, dict):
++            return 0.0
++        try:
++            position = float(entry.get("position") or 0.0)
++            total = float(entry.get("total") or 0.0)
++        except (TypeError, ValueError):
++            return 0.0
++        if position < _RESUME_MIN_SECONDS:
++            return 0.0
++        if total > 0 and position >= total * _RESUME_NEAR_END_FRACTION:
++            return 0.0
++        return position
++
++    def _resume_persist(self, key, position, total):
++        """Store (or clear) the resume position for ``key``."""
++        if not key:
++            return
++        finished = total > 0 and position >= total * _RESUME_NEAR_END_FRACTION
++        items = _resume_store_load()
++        if position < _RESUME_MIN_SECONDS or finished:
++            # Nothing worth resuming — drop any stale entry so the next
++            # play starts clean instead of jumping near the end.
++            if items.pop(key, None) is None:
++                return
++        else:
++            items[key] = {
++                "position": round(position, 3),
++                "total": round(total, 3),
++                "updated": int(_time.time()),
++            }
++        _resume_store_save(items)
++
++    def _resume_persist_current(self, force=False):
++        """Persist the in-flight position, throttled unless ``force``."""
++        with self._state_lock:
++            key = self._resume_key
++            position = self._last_position
++            total = self._total_time
++            saved_at = self._resume_saved_at
++            if not force:
++                if _time.monotonic() - saved_at < _RESUME_SAVE_INTERVAL_SECONDS:
++                    return
++            self._resume_saved_at = _time.monotonic()
++        self._resume_persist(key, position, total)
++
+     def _cleanup_proxy_session(self):
+         """Kill any active proxy ffmpeg processes.
+ 
+@@ -124,13 +247,37 @@
+         active = _HOME_WINDOW.getProperty(_PROP_ACTIVE)
+         if active != "true":
+             return
++
++        stream_url = _HOME_WINDOW.getProperty(_PROP_STREAM_URL)
++        title = _HOME_WINDOW.getProperty(_PROP_STREAM_TITLE)
++        # Prefer the TMDB-identity key: it still matches when a later play of
++        # the same episode/movie resolves to a different release. Fall back to
++        # the release title when identity is unknown (non-TMDB playback).
++        resume_key = _HOME_WINDOW.getProperty(_PROP_CONTENT_KEY) or title
++        # Work out the resume point before taking the lock — the store lookup
++        # touches the filesystem and callbacks must not block behind it. An
++        # explicit position handed over by resolver.py wins; otherwise fall
++        # back to our own store.
++        try:
++            resume_position = max(
++                0.0, float(_HOME_WINDOW.getProperty(_PROP_RESUME_POSITION) or 0.0)
++            )
++        except (TypeError, ValueError):
++            resume_position = 0.0
++        if resume_position <= 0:
++            resume_position = self._resume_lookup(resume_key)
++
+         with self._state_lock:
+-            self._stream_url = _HOME_WINDOW.getProperty(_PROP_STREAM_URL)
+-            self._title = _HOME_WINDOW.getProperty(_PROP_STREAM_TITLE)
++            self._stream_url = stream_url
++            self._title = title
++            self._resume_key = resume_key
+             self._state = PlaybackState.MONITORING
+             self._retry_count = 0
+             self._last_position = 0.0
++            self._total_time = 0.0
++            self._resume_saved_at = 0.0
+             self._av_started = False
++            self._resume_position = resume_position
+             # ``time.monotonic()`` rather than ``time.time()`` so an NTP
+             # step that lands during the 30 s startup grace can't trip a
+             # false "playback never started" notification. Compared
+@@ -138,23 +285,41 @@
+             # TODO.md §H.2-M35.
+             self._play_time = time.monotonic()
+             title = self._title
+-        # Clear all three properties — not just ACTIVE — so a future
++        # Clear all four properties — not just ACTIVE — so a future
+         # second resolver call that fails before re-writing them
+         # (network blip, _play_via_proxy crash) doesn't leak the prior
+         # session's URL/title into the next monitor cycle. The values we
+         # need are now snapshotted onto self.* fields. TODO.md §H.2-L29.
+-        for prop in (_PROP_ACTIVE, _PROP_STREAM_URL, _PROP_STREAM_TITLE):
++        for prop in (
++            _PROP_ACTIVE,
++            _PROP_STREAM_URL,
++            _PROP_STREAM_TITLE,
++            _PROP_RESUME_POSITION,
++            _PROP_CONTENT_KEY,
++        ):
+             try:
+                 _HOME_WINDOW.clearProperty(prop)
+             except _PLAYER_RUNTIME_ERRORS:
+                 pass
+         xbmc.log(
+-            "NZB-DAV: Service monitoring stream '{}'".format(title),
++            "NZB-DAV: Service monitoring stream '{}' (resume={:.0f}s)".format(
++                title, resume_position
++            ),
+             xbmc.LOGINFO,
+         )
+ 
+     def onAVStarted(self):
+-        """Reset retry state when playback begins successfully."""
++        """Reset retry state when playback begins successfully.
++
++        Also performs the resume seek here. Kodi's native resume cannot be
++        used for these streams (see the resume notes at the top of this
++        module), so the position comes from our own store and is applied
++        explicitly once real playback has begun — ``onAVStarted`` is the
++        first point at which the demuxer is ready to accept a seek.
++        The position is consumed (zeroed) immediately so a mid-playback
++        reconnect cannot bounce back to the original resume point; retries
++        set it again deliberately in ``_retry_playback``.
++        """
+         with self._state_lock:
+             if self._state not in (PlaybackState.MONITORING, PlaybackState.ERROR):
+                 return
+@@ -162,10 +327,65 @@
+             self._av_started = True
+             self._state = PlaybackState.MONITORING
+             title = self._title
++            resume_position = self._resume_position
++            self._resume_position = 0.0
++        try:
++            total_time = self.getTotalTime()
++        except _PLAYER_RUNTIME_ERRORS:
++            total_time = 0.0
++        with self._state_lock:
++            self._total_time = total_time or 0.0
+         xbmc.log(
+             "NZB-DAV: Playback started for '{}'".format(title),
+             xbmc.LOGINFO,
+         )
++        if resume_position <= 0:
++            return
++        # A seek issued at the instant AV starts is frequently dropped: the
++        # demuxer is still opening and Kodi has no duration yet. Wait for a
++        # usable duration (bounded) before seeking, then verify the seek
++        # actually moved the playhead and retry once if it did not.
++        for _ in range(20):
++            if self._monitor.waitForAbort(0.25):
++                return
++            try:
++                if not self.isPlayingVideo():
++                    return
++                if (total_time or self.getTotalTime()) > resume_position:
++                    break
++            except _PLAYER_RUNTIME_ERRORS:
++                return
++        for attempt in (1, 2):
++            try:
++                self.seekTime(resume_position)
++            except _PLAYER_RUNTIME_ERRORS as error:
++                xbmc.log(
++                    "NZB-DAV: Resume seek failed for '{}': {}".format(title, error),
++                    xbmc.LOGWARNING,
++                )
++                return
++            if self._monitor.waitForAbort(1.5):
++                return
++            try:
++                reached = self.getTime()
++            except _PLAYER_RUNTIME_ERRORS:
++                return
++            # Allow generous slack: the demuxer lands on the nearest keyframe.
++            if abs(reached - resume_position) <= 60:
++                xbmc.log(
++                    "NZB-DAV: Resumed '{}' at {:.0f}s (requested {:.0f}s)".format(
++                        title, reached, resume_position
++                    ),
++                    xbmc.LOGINFO,
++                )
++                with self._state_lock:
++                    self._last_position = reached
++                return
++            xbmc.log(
++                "NZB-DAV: Resume seek attempt {} for '{}' landed at {:.0f}s, "
++                "wanted {:.0f}s".format(attempt, title, reached, resume_position),
++                xbmc.LOGWARNING,
++            )
+ 
+     def _clear_stream_properties(self):
+         """Erase the IPC window properties for this stream.
+@@ -184,6 +404,9 @@
+ 
+     def onPlayBackStopped(self):
+         """Mark stream inactive when user stops playback."""
++        # Snapshot the final position *before* flipping state to IDLE so the
++        # resume store records where the user actually stopped.
++        self._resume_persist_current(force=True)
+         with self._state_lock:
+             if self._state == PlaybackState.IDLE:
+                 return
+@@ -207,6 +430,11 @@
+                 return
+             self._state = PlaybackState.IDLE
+             title = self._title
++            total_time = self._total_time
++            resume_key = self._resume_key
++        # Watched to the end — drop any stored position so the next play
++        # starts from the beginning rather than in the closing seconds.
++        self._resume_persist(resume_key, total_time, total_time)
+         xbmc.log(
+             "NZB-DAV: Playback completed for '{}'".format(title),
+             xbmc.LOGINFO,
+@@ -244,7 +472,7 @@
+             if self._state not in (PlaybackState.MONITORING, PlaybackState.ERROR):
+                 return
+             try:
+-                self._last_position = max(0.0, float(time))
++                self._last_position = max(0.0, float(time) / 1000.0)
+             except (TypeError, ValueError):
+                 pos_failed = True
+             else:
+@@ -258,7 +486,7 @@
+             "NZB-DAV: Playback seek for '{}' -> {:.0f}s (offset={:.0f}s)".format(
+                 title,
+                 position,
+-                float(seek_offset),
++                float(seek_offset) / 1000.0,
+             ),
+             xbmc.LOGINFO,
+         )
+@@ -305,6 +533,11 @@
+ 
+         li = xbmcgui.ListItem(path=stream_url)
+         li.setProperty("StartOffset", str(position))
++        # ``StartOffset``'s units are ambiguous across Kodi versions, so also
++        # arm the explicit seek path used for resume: onAVStarted will apply
++        # this position once the new stream is actually playing.
++        with self._state_lock:
++            self._resume_position = position
+         self.play(stream_url, li)
+ 
+         # Wait for playback to start or fail (10s timeout)
+@@ -392,6 +625,9 @@
+                 return
+ 
+         self._save_position()
++        # Checkpoint the resume position while playing so an abrupt exit
++        # (Kodi crash, power loss) still leaves a usable resume point.
++        self._resume_persist_current()
+ 
+         with self._state_lock:
+             state = self._state
+@@ -455,6 +691,8 @@
+         _PROP_STREAM_URL,
+         _PROP_STREAM_TITLE,
+         _PROP_PROXY_TOKEN,
++        _PROP_RESUME_POSITION,
++        _PROP_CONTENT_KEY,
+     ):
+         try:
+             _HOME_WINDOW.clearProperty(stale_prop)

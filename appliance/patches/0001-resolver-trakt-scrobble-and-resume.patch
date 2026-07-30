@@ -1,0 +1,307 @@
+--- backups/nzbdav-playerinfostring-prefix-fix-20260730/resolver.py.orig	2026-07-30 12:53:57.138719400 +1000
++++ addons/plugin.video.nzbdav/resources/lib/resolver.py	2026-07-30 14:14:55.903025500 +1000
+@@ -230,7 +230,10 @@
+     starts and the user sees dialog 30121.
+ 
+     Deleting the bookmark before each play forces Kodi to treat every play
+-    as a fresh first play, which bypasses the broken resume pipeline.
++    as a fresh first play, which bypasses the broken resume pipeline. The
++    prior position is read before deletion and returned (0.0 if none) so
++    the caller can seek there manually once our own playback has started,
++    instead of losing resume support entirely.
+ 
+     Called from the resolve flow with the params that led to this play so
+     we can also target the TMDBHelper URL (not just our own plugin URL).
+@@ -257,8 +260,9 @@
+ 
+     db_path = _locate_kodi_video_db()
+     if not db_path:
+-        return
++        return 0.0
+ 
++    resume_position = 0.0
+     try:
+         # ``sqlite3.connect`` as a context manager only commits/rolls-back;
+         # it does NOT call ``conn.close()``. Wrap in contextlib.closing
+@@ -270,7 +274,20 @@
+                 target_ids = _collect_kodi_playback_target_ids(cur, params)
+ 
+                 if not target_ids:
+-                    return
++                    return 0.0
++
++                # Read the prior resume position (type=1 is Kodi's auto
++                # resume bookmark) before it is deleted below, so the caller
++                # can seek there manually once our own playback has started.
++                for id_file in target_ids:
++                    cur.execute(
++                        "SELECT timeInSeconds FROM bookmark "
++                        "WHERE idFile = ? AND type = 1",
++                        (id_file,),
++                    )
++                    for (time_in_seconds,) in cur.fetchall():
++                        if time_in_seconds and time_in_seconds > resume_position:
++                            resume_position = time_in_seconds
+ 
+                 # Narrowest possible mutation: only clear bookmark rows. The
+                 # files/settings/streamdetails rows stay intact — Kodi will
+@@ -280,7 +297,9 @@
+                     cur.execute("DELETE FROM bookmark WHERE idFile = ?", (id_file,))
+ 
+         xbmc.log(
+-            "NZB-DAV: Cleared bookmark for {} file(s)".format(len(target_ids)),
++            "NZB-DAV: Cleared bookmark for {} file(s), resume_position={:.0f}s".format(
++                len(target_ids), resume_position
++            ),
+             xbmc.LOGINFO,
+         )
+     except sqlite3.OperationalError as e:
+@@ -290,21 +309,24 @@
+             "NZB-DAV: MyVideos DB busy, skipping bookmark cleanup: {}".format(e),
+             xbmc.LOGDEBUG,
+         )
++        return 0.0
+     except sqlite3.Error as e:
+         xbmc.log(
+             "NZB-DAV: SQLite error during bookmark cleanup: {}".format(e),
+             xbmc.LOGWARNING,
+         )
++        return 0.0
++    return resume_position
+ 
+ 
+ def _start_playback_state_cleanup(params=None):
+     """Start bookmark cleanup in the background and return its state."""
+     done = threading.Event()
+-    state = {"done": done, "error": None, "thread": None}
++    state = {"done": done, "error": None, "thread": None, "resume_position": 0.0}
+ 
+     def _worker():
+         try:
+-            _clear_kodi_playback_state(params)
++            state["resume_position"] = _clear_kodi_playback_state(params) or 0.0
+         except Exception as error:  # pylint: disable=broad-except
+             state["error"] = error
+             xbmc.log(
+@@ -621,7 +643,7 @@
+             unique_ids["tvshow.imdb"] = show_imdb_id
+         player_string = {
+             "tmdb_type": "episode",
+-            "tmdb_id": show_tmdb_id,
++            "tmdb_id": int(show_tmdb_id) if show_tmdb_id.isdigit() else show_tmdb_id,
+             "imdb_id": show_imdb_id,
+             "tvdb_id": str(params.get("tvdb", "") or "").strip(),
+             "season": int(season or 0),
+@@ -629,7 +651,7 @@
+         }
+         player_string = {key: value for key, value in player_string.items() if value}
+         xbmcgui.Window(10000).setProperty(
+-            "PlayerInfoString", json.dumps(player_string)
++            "TMDbHelper.PlayerInfoString", json.dumps(player_string)
+         )
+     else:
+         tmdb_id = str(params.get("tmdb_id", "") or "").strip()
+@@ -1020,12 +1042,64 @@
+         )
+ 
+ 
++def _content_resume_key(params):
++    """Return a stable resume key for the content being played.
++
++    Keyed on TMDB identity rather than the release filename, so a stored
++    resume point still matches when a later play of the same episode/movie
++    picks a *different* release (different indexer result, re-download,
++    upgraded quality). Returns "" when identity is unknown, in which case
++    the service falls back to keying on the release title.
++    """
++    params = params or {}
++    media_type = str(params.get("type", "") or "").lower()
++    if media_type == "episode":
++        show_id = str(
++            params.get("show_tmdb_id", params.get("tmdb_id", "")) or ""
++        ).strip()
++        season = str(params.get("season", params.get("ep_season", "")) or "").strip()
++        episode = str(params.get("episode", params.get("ep_episode", "")) or "").strip()
++        if show_id and season and episode:
++            return "episode:{}:{}:{}".format(show_id, season, episode)
++        return ""
++    tmdb_id = str(params.get("tmdb_id", "") or "").strip()
++    if tmdb_id:
++        return "movie:{}".format(tmdb_id)
++    return ""
++
++
++def _signal_service_playback(home, play_url, title, params, resume_position=0.0):
++    """Publish this playback session to the background service.
++
++    ``nzbdav.active`` is written **last** so the service's 1 Hz tick can
++    never observe a half-populated session.
++    """
++    home.setProperty("nzbdav.stream_url", play_url)
++    home.setProperty("nzbdav.stream_title", title)
++    # Always write these two, clearing them when they do not apply: a stale
++    # value left by an earlier session that the service never consumed must
++    # not be inherited here, or this play could resume another item's
++    # position.
++    content_key = _content_resume_key(params)
++    if content_key:
++        home.setProperty("nzbdav.content_key", content_key)
++    else:
++        home.clearProperty("nzbdav.content_key")
++    if resume_position and resume_position > 0:
++        home.setProperty("nzbdav.resume_position", "{:.3f}".format(resume_position))
++    else:
++        home.clearProperty("nzbdav.resume_position")
++    home.setProperty("nzbdav.active", "true")
++
++
+ def _finish_direct_playback(handle, prepared):
+     """Finish resolver playback on the Kodi thread."""
+     _resolve_stage("finish_direct_playback_start")
+     stream_url = prepared["stream_url"]
+     stream_headers = prepared["stream_headers"]
+     service_port = prepared.get("service_port")
++    metadata_params = prepared.get("metadata_params", {})
++    resume_position = prepared.get("resume_position", 0.0) or 0.0
+     _resolve_stage(
+         "finish_direct_playback_got_params service_port={}".format(service_port)
+     )
+@@ -1049,9 +1123,13 @@
+             bust_url = _cache_bust_url(stream_url)
+             li = _make_playable_listitem(bust_url, stream_headers)
+             play_url = _build_play_url(bust_url, stream_headers)
+-            home.setProperty("nzbdav.stream_url", play_url)
+-            home.setProperty("nzbdav.stream_title", stream_url.rsplit("/", 1)[-1])
+-            home.setProperty("nzbdav.active", "true")
++            _signal_service_playback(
++                home,
++                play_url,
++                stream_url.rsplit("/", 1)[-1],
++                metadata_params,
++                resume_position,
++            )
+             xbmcplugin.setResolvedUrl(handle, True, li)
+             return
+ 
+@@ -1059,9 +1137,13 @@
+         li.setContentLookup(False)
+         _apply_proxy_mime(li, stream_url, stream_info)
+ 
+-        home.setProperty("nzbdav.stream_url", proxy_url)
+-        home.setProperty("nzbdav.stream_title", stream_url.rsplit("/", 1)[-1])
+-        home.setProperty("nzbdav.active", "true")
++        _signal_service_playback(
++            home,
++            proxy_url,
++            stream_url.rsplit("/", 1)[-1],
++            metadata_params,
++            resume_position,
++        )
+         xbmcplugin.setResolvedUrl(handle, True, li)
+         return
+ 
+@@ -1074,9 +1156,13 @@
+ 
+     li = _make_playable_listitem(bust_url, stream_headers)
+     home = xbmcgui.Window(10000)
+-    home.setProperty("nzbdav.stream_url", play_url)
+-    home.setProperty("nzbdav.stream_title", stream_url.rsplit("/", 1)[-1])
+-    home.setProperty("nzbdav.active", "true")
++    _signal_service_playback(
++        home,
++        play_url,
++        stream_url.rsplit("/", 1)[-1],
++        metadata_params,
++        resume_position,
++    )
+     xbmcplugin.setResolvedUrl(handle, True, li)
+ 
+ 
+@@ -1088,6 +1174,26 @@
+     home = xbmcgui.Window(10000)
+     title = stream_url.rsplit("/", 1)[-1]
+     metadata_params = prepared.get("metadata_params", {})
++    resume_position = prepared.get("resume_position", 0.0) or 0.0
++
++    # Diagnostic only (no behaviour depends on this): NZBDav starts its own
++    # playback item, so Kodi's "Resume / Play from beginning" choice is not
++    # handed down to us. Log what Kodi still exposes at this point so we can
++    # tell whether that choice is recoverable and honour it properly.
++    try:
++        xbmc.log(
++            "NZB-DAV: resume-intent probe: li_resume='{}' li_total='{}' "
++            "li_pct='{}' li_label='{}' player_time='{}'".format(
++                xbmc.getInfoLabel("ListItem.Property(ResumeTime)"),
++                xbmc.getInfoLabel("ListItem.Property(TotalTime)"),
++                xbmc.getInfoLabel("ListItem.PercentPlayed"),
++                xbmc.getInfoLabel("ListItem.Label"),
++                xbmc.getInfoLabel("Player.Time"),
++            ),
++            xbmc.LOGINFO,
++        )
++    except _RESOLVE_RUNTIME_ERRORS:
++        pass
+ 
+     if service_port:
+         proxy_url = prepared["proxy_url"]
+@@ -1102,9 +1208,9 @@
+             li = _make_playable_listitem(bust_url, stream_headers)
+             _apply_tmdb_helper_metadata(li, metadata_params)
+             play_url = _build_play_url(bust_url, stream_headers)
+-            home.setProperty("nzbdav.stream_url", play_url)
+-            home.setProperty("nzbdav.stream_title", title)
+-            home.setProperty("nzbdav.active", "true")
++            _signal_service_playback(
++                home, play_url, title, metadata_params, resume_position
++            )
+             xbmc.Player().play(li.getPath(), li)
+             return
+ 
+@@ -1112,9 +1218,9 @@
+         li.setContentLookup(False)
+         _apply_proxy_mime(li, stream_url, stream_info)
+         _apply_tmdb_helper_metadata(li, metadata_params)
+-        home.setProperty("nzbdav.stream_url", proxy_url)
+-        home.setProperty("nzbdav.stream_title", title)
+-        home.setProperty("nzbdav.active", "true")
++        _signal_service_playback(
++            home, proxy_url, title, metadata_params, resume_position
++        )
+         xbmc.Player().play(proxy_url, li)
+         _show_cache_prompt_after_playback(stream_info)
+         return
+@@ -1124,9 +1230,9 @@
+     _apply_tmdb_helper_metadata(li, metadata_params)
+     play_url = _build_play_url(bust_url, stream_headers)
+     xbmc.log("NZB-DAV: Playing direct (no proxy): {}".format(stream_url), xbmc.LOGINFO)
+-    home.setProperty("nzbdav.stream_url", play_url)
+-    home.setProperty("nzbdav.stream_title", title)
+-    home.setProperty("nzbdav.active", "true")
++    _signal_service_playback(
++        home, play_url, title, metadata_params, resume_position
++    )
+     xbmc.Player().play(li.getPath(), li)
+ 
+ 
+@@ -3294,6 +3400,11 @@
+             )
+             _wait_playback_state_cleanup(playback_cleanup_state)
+             prepared = _wait_direct_playback_prepare(playback_prepare_state)
++            if prepared is not None:
++                prepared["metadata_params"] = params
++                prepared["resume_position"] = (
++                    (playback_cleanup_state or {}).get("resume_position", 0.0) or 0.0
++                )
+             _finish_direct_playback(handle, prepared)
+         else:
+             _stop_fallback_submit_worker(fallback_state, cancel_submitted=True)
+@@ -3426,6 +3537,9 @@
+             prepared = _wait_direct_playback_prepare(playback_prepare_state)
+             if prepared is not None:
+                 prepared["metadata_params"] = resolve_params
++                prepared["resume_position"] = (
++                    (playback_cleanup_state or {}).get("resume_position", 0.0) or 0.0
++                )
+             _resolve_stage(
+                 "prepare wait done service_port={}".format(
+                     prepared.get("service_port") if prepared else ""
