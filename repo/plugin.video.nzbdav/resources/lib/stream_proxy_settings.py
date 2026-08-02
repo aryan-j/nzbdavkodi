@@ -195,6 +195,12 @@ def _passthrough_runtime_settings_from_snapshot(snapshot):
         "zero_fill_budget_enabled": _sp._bool_from_snapshot(
             snapshot, "zero_fill_budget_enabled", default=True
         ),
+        # Compatibility default stays true for callers constructing legacy
+        # snapshots directly. Kodi's settings schema defaults new installs to
+        # false so normal playback never fabricates missing media bytes.
+        "allow_zero_fill": _sp._bool_from_snapshot(
+            snapshot, "allow_zero_fill", default=True
+        ),
         "retry_ladder_enabled": _sp._bool_from_snapshot(
             snapshot, "retry_ladder_enabled", default=True
         ),
@@ -350,6 +356,7 @@ def _read_passthrough_runtime_settings():
         "contract_mode": contract_mode,
         "density_breaker_enabled": _sp._density_breaker_enabled(contract_mode),
         "zero_fill_budget_enabled": _sp._zero_fill_budget_enabled(),
+        "allow_zero_fill": _sp._get_bool_setting("allow_zero_fill", default=True),
         "retry_ladder_enabled": _sp._retry_ladder_enabled(),
         "send_200_no_range_enabled": _sp._send_200_no_range_enabled(),
         "passthrough_stall_wait_seconds": _sp._get_passthrough_stall_wait_seconds(),

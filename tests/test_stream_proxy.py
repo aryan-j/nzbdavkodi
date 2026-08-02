@@ -1223,6 +1223,7 @@ def test_prepare_stream_uses_settings_snapshot_without_kodi_setting_reads():
         "contract_mode": "warn",
         "density_breaker_enabled": False,
         "zero_fill_budget_enabled": True,
+        "allow_zero_fill": True,
         "retry_ladder_enabled": True,
         "send_200_no_range_enabled": False,
         "passthrough_stall_wait_seconds": 120,
@@ -2530,6 +2531,7 @@ def test_first_get_writes_prefetched_bytes_before_slow_runtime_settings():
             "contract_mode": "warn",
             "density_breaker_enabled": False,
             "zero_fill_budget_enabled": True,
+            "allow_zero_fill": True,
             "retry_ladder_enabled": True,
         }
 
@@ -4372,6 +4374,42 @@ def test_serve_remux_sets_socket_write_timeout():
         handler._serve_remux(ctx)
 
     handler.connection.settimeout.assert_called_once_with(_REMUX_WRITE_TIMEOUT)
+
+
+def test_serve_proxy_uses_longer_passthrough_write_timeout():
+    """Decoder resets must not inherit ffmpeg's shorter cleanup deadline."""
+    from resources.lib.stream_proxy import (
+        _PASSTHROUGH_WRITE_TIMEOUT,
+        _REMUX_WRITE_TIMEOUT,
+    )
+
+    handler = _make_handler_with_server({})
+    handler.connection = MagicMock()
+
+    handler._serve_proxy_set_write_timeout()
+
+    assert _PASSTHROUGH_WRITE_TIMEOUT > _REMUX_WRITE_TIMEOUT
+    handler.connection.settimeout.assert_called_once_with(_PASSTHROUGH_WRITE_TIMEOUT)
+
+
+def test_serve_proxy_never_fabricates_bytes_when_zero_fill_disabled():
+    from resources.lib.stream_proxy import _ProxyStreamState
+
+    handler = _make_handler_with_server({})
+    state = _ProxyStreamState()
+    state.current = 100
+    state.end = 199
+    state.allow_zero_fill = False
+
+    with patch.object(handler, "_find_skip_offset") as find_skip, patch.object(
+        handler, "_write_zeros"
+    ) as write_zeros:
+        result = handler._serve_proxy_zerofill_step({}, state)
+
+    assert result == "return"
+    assert state.terminal_reason == "missing_bytes_not_fabricated"
+    find_skip.assert_not_called()
+    write_zeros.assert_not_called()
 
 
 def test_prepare_stream_clears_previous_sessions():

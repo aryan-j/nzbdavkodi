@@ -164,6 +164,15 @@ class _ProxyServeStallMixin:  # pylint: disable=too-few-public-methods
     def _serve_proxy_zerofill_step(self, ctx, st):
         """Probe forward and zero-fill the unreadable gap. Verbatim move."""
         remaining = st.end - st.current + 1
+        if not st.allow_zero_fill:
+            st.terminal_reason = "missing_bytes_not_fabricated"
+            _sp.xbmc.log(
+                "NZB-DAV: Unreadable media bytes at offset {}; "
+                "closing with {} bytes unread instead of zero-filling "
+                "(reason={})".format(st.current, remaining, st.terminal_reason),
+                _sp.xbmc.LOGERROR,
+            )
+            return "return"
         skip = self._find_skip_offset(st.active_ctx, st.current, st.end)
 
         if self._serve_proxy_recovery_exhausted(st, skip, remaining):

@@ -1096,6 +1096,12 @@
 					<default>true</default>
 					<control type="toggle"/>
 				</setting>
+				<setting id="allow_zero_fill" type="boolean">
+					<level>0</level>
+					<default>false</default>
+					<visible>false</visible>
+					<control type="toggle"/>
+				</setting>
 				<setting id="retry_ladder_enabled" type="boolean" label="30150" help="30352">
 					<level>0</level>
 					<default>true</default>

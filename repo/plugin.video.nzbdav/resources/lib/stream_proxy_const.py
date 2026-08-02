@@ -301,6 +301,7 @@ _SETTINGS_SNAPSHOT_KEYS = (
     "strict_contract_mode",
     "density_breaker_enabled",
     "zero_fill_budget_enabled",
+    "allow_zero_fill",
     "retry_ladder_enabled",
     "send_200_no_range",
     "proxy_convert_subs",
@@ -321,6 +322,11 @@ _ZERO_FILL_BUFFER = bytes(65536)
 # producing output into the void.  60s comfortably exceeds any normal
 # buffering stall on a healthy client while still bounding zombie lifetime.
 _REMUX_WRITE_TIMEOUT = 60
+# Pass-through playback can legitimately stop consuming data while Kodi
+# rebuilds its video pipeline after a seek or decoder reset.  Keep this bounded
+# so abandoned clients cannot leak handler/upstream sockets, but allow more
+# headroom than remux (where ffmpeg must be reaped promptly).
+_PASSTHROUGH_WRITE_TIMEOUT = 180
 _REMUX_STDOUT_IDLE_TIMEOUT = 30.0
 _PREPARE_TOKEN_HEADER = "X-NZBDAV-Token"  # nosec B105 — HTTP header name, not a secret
 # /prepare client retry. A momentarily thread-starved proxy accepts then drops

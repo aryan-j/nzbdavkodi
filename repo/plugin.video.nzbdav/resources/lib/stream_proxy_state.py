@@ -44,6 +44,7 @@ class _ProxyStreamState:  # pylint: disable=too-few-public-methods
         "contract_mode",
         "density_breaker_enabled",
         "zero_fill_budget_enabled",
+        "allow_zero_fill",
         "retry_ladder_enabled",
         "result",
         "progressed_this_iter",
@@ -74,6 +75,7 @@ class _ProxyStreamState:  # pylint: disable=too-few-public-methods
         self.contract_mode = None
         self.density_breaker_enabled = False
         self.zero_fill_budget_enabled = False
+        self.allow_zero_fill = False
         self.retry_ladder_enabled = False
         self.result = None
         self.progressed_this_iter = False
