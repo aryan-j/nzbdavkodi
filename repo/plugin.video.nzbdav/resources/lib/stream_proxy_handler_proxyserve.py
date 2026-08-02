@@ -119,7 +119,7 @@ class _ProxyServeMixin:  # pylint: disable=too-few-public-methods
         # opens a second connection, two handlers + two upstream HTTP
         # responses live at once, MemoryError hits the second handler.
         try:
-            self.connection.settimeout(_sp._REMUX_WRITE_TIMEOUT)
+            self.connection.settimeout(_sp._PASSTHROUGH_WRITE_TIMEOUT)
         except (OSError, AttributeError):
             pass
 
@@ -201,6 +201,7 @@ class _ProxyServeMixin:  # pylint: disable=too-few-public-methods
         st.contract_mode = runtime_settings["contract_mode"]
         st.density_breaker_enabled = runtime_settings["density_breaker_enabled"]
         st.zero_fill_budget_enabled = runtime_settings["zero_fill_budget_enabled"]
+        st.allow_zero_fill = runtime_settings.get("allow_zero_fill", True)
         st.retry_ladder_enabled = runtime_settings["retry_ladder_enabled"]
 
         # Whether any REAL upstream bytes have been delivered in this request
