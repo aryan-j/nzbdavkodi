@@ -228,10 +228,10 @@ def _maybe_notify_stream_starvation(
     server, ctx, terminal_reason, total_streamed, requested_bytes
 ):
     """Fire ONE clear notification when a pass-through stream ends because the
-    backend could not keep up, so the user gets an explanation instead of a
-    silent black screen. This is the graceful-starvation guard for the live
-    failure mode where nzbdav delivers far below the release's bitrate and/or
-    returns HTTP 5xx for a sustained period: playback exhausts the head-start,
+    media source became unreadable or too slow, so the user gets an explanation
+    instead of a silent black screen. This is the graceful-starvation guard for
+    the live failure mode where nzbdav delivers far below the release's bitrate
+    and/or returns HTTP 5xx for a sustained period: playback exhausts the head-start,
     the demuxer EOFs, and Kodi stops with no reason. The user should learn WHY.
 
     Distinct from the early one-shot ``_record_upstream_unreachable`` toast
@@ -262,14 +262,16 @@ def _maybe_notify_stream_starvation(
         return False
 
     _sp.xbmc.log(
-        "NZB-DAV: Stream stalled — backend could not keep up "
+        "NZB-DAV: Stream stalled — media source unreadable or too slow "
         "(terminal={} streamed={} requested={} reason=stream_starvation)".format(
             terminal_reason, total_streamed, requested_bytes
         ),
         _sp.xbmc.LOGWARNING,
     )
     try:
-        _sp._notify("NZB-DAV", "nzbdav can't keep up — playback stalled")
+        _sp._notify(
+            "NZB-DAV", "Media source unreadable or too slow — playback stalled"
+        )
     except (RuntimeError, OSError):
         pass
     return True

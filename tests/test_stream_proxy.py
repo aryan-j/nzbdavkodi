@@ -12678,11 +12678,11 @@ def test_serve_proxy_debounces_recovery_notify_within_one_session():
         sys.modules["xbmcaddon"].Addon.return_value = original
 
     # The recovery summary stays debounced to a single toast across recoveries;
-    # the separate graceful-starvation guard adds one clear "can't keep up" toast
+    # the separate graceful-starvation guard adds one clear source-health toast
     # when the session aborts on backend starvation.
     notify_msgs = [call.args[1] for call in mock_notify.call_args_list]
     assert sum("recoveries" in msg for msg in notify_msgs) == 1
-    assert any("keep up" in msg.lower() for msg in notify_msgs)
+    assert any("source unreadable or too slow" in msg.lower() for msg in notify_msgs)
 
 
 def test_serve_proxy_retries_original_range_before_skip_probe():
@@ -12985,10 +12985,10 @@ def test_serve_proxy_aborts_when_session_zero_fill_ratio_exceeds_cap(mock_xbmc):
 
     mock_write_zeros.assert_not_called()
     # The recovery summary still fires exactly once; the graceful-starvation
-    # guard adds one clear "can't keep up" toast on this backend-starvation abort.
+    # guard adds one clear source-health toast on this backend-starvation abort.
     notify_msgs = [call.args[1] for call in mock_notify.call_args_list]
     assert sum("recoveries" in msg for msg in notify_msgs) == 1
-    assert any("keep up" in msg.lower() for msg in notify_msgs)
+    assert any("source unreadable or too slow" in msg.lower() for msg in notify_msgs)
     logged = "\n".join(call.args[0] for call in mock_xbmc.log.call_args_list)
     assert "reason=session_zero_fill_budget_exceeded" in logged
 
@@ -16234,7 +16234,7 @@ def test_storage_to_webdav_path_content_passthrough_unchanged():
 def test_maybe_notify_stream_starvation_fires_on_recent_outage_disconnect():
     """The live Shawshank incident: client_disconnected, a RECENT upstream
     outage (nzbdav blipped back ~9s before Kodi gave up), only ~140MB of a 57GB
-    file delivered. Must fire ONE clear 'can't keep up' toast, not a silent
+    file delivered. Must fire ONE clear source-health toast, not a silent
     black screen."""
     from resources.lib import stream_proxy
 
@@ -16248,7 +16248,7 @@ def test_maybe_notify_stream_starvation_fires_on_recent_outage_disconnect():
         )
     assert fired is True
     mock_notify.assert_called_once()
-    assert "keep up" in mock_notify.call_args[0][1].lower()
+    assert "source unreadable or too slow" in mock_notify.call_args[0][1].lower()
 
 
 def test_maybe_notify_stream_starvation_fires_when_upstream_still_down():
@@ -16675,7 +16675,7 @@ def test_maybe_notify_stream_starvation_fires_on_forward_stall_exhaustion():
         )
     assert fired is True
     mock_notify.assert_called_once()
-    assert "keep up" in mock_notify.call_args[0][1].lower()
+    assert "source unreadable or too slow" in mock_notify.call_args[0][1].lower()
 
 
 def test_maybe_notify_stream_starvation_silent_on_density_breaker():
