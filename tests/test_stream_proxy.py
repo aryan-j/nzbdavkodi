@@ -98,7 +98,7 @@ def _make_handler():
 def test_requested_proxy_timeout_defaults():
     from resources.lib import stream_proxy
 
-    assert stream_proxy._UPSTREAM_OPEN_TIMEOUT == 60
+    assert stream_proxy._UPSTREAM_OPEN_TIMEOUT == 15
     assert stream_proxy._SKIP_PROBE_TIMEOUT == 60
     assert stream_proxy._PROBE_DEADLINE_SECONDS == 30.0
 

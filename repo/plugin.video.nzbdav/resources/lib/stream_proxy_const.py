@@ -71,7 +71,7 @@ _FFPROBE_PATHS = [
 ]
 
 # Pass-through proxy recovery constants
-_UPSTREAM_OPEN_TIMEOUT = 60
+_UPSTREAM_OPEN_TIMEOUT = 15
 # Dedicated recv() deadline for the streaming body, armed explicitly on the
 # upstream socket AFTER the response headers arrive (see
 # _set_upstream_read_timeout). _UPSTREAM_OPEN_TIMEOUT above is inherited by
@@ -127,7 +127,7 @@ _DENSITY_BREAKER_ZERO_FILL_RATIO = 0.5
 # is closed so Kodi's CCurlFile reconnects with a fresh upstream fetch.
 # Without this, a slow-trickle upstream — e.g. a Usenet article fetch that
 # takes 60+ seconds — keeps delivering chunks under the per-read socket
-# timeout (_UPSTREAM_OPEN_TIMEOUT, 60 s), so neither the urlopen-level
+# timeout (_UPSTREAM_OPEN_TIMEOUT, 15 s), so neither the urlopen-level
 # timeout nor Kodi's own watchdog ever fires. Bytes drip in below playable
 # rate, Kodi's CFileCache underruns, audio stalls, and the player wedges in
 # a state where subsequent seeks don't trigger a fresh range request
