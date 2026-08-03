@@ -115,7 +115,7 @@ _MAX_TOTAL_ZERO_FILL = 67108864
 # wait (restores the prior instant-close behavior). Does NOT apply to
 # SHORT_READ_RECOVERABLE (genuinely-missing articles must zero-fill past) nor to
 # a byte-0 first read / fresh seek that never streamed (issue #214 fast-fail).
-_DEFAULT_PASSTHROUGH_STALL_WAIT_SECONDS = 120
+_DEFAULT_PASSTHROUGH_STALL_WAIT_SECONDS = 20
 _PASSTHROUGH_STALL_WAIT_MAX_SECONDS = 600
 _PASSTHROUGH_STALL_WAIT_BACKOFF_SECONDS = 2.0
 # Density breaker: abort if the recent recovery window becomes mostly synthetic

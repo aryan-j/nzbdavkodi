@@ -1225,7 +1225,7 @@ def test_prepare_stream_uses_settings_snapshot_without_kodi_setting_reads():
         "zero_fill_budget_enabled": True,
         "retry_ladder_enabled": True,
         "send_200_no_range_enabled": False,
-        "passthrough_stall_wait_seconds": 120,
+        "passthrough_stall_wait_seconds": 20,
         "readahead_buffer_mb": 256,
     }
     assert "_passthrough_runtime_settings_thread" not in ctx
@@ -1234,7 +1234,7 @@ def test_prepare_stream_uses_settings_snapshot_without_kodi_setting_reads():
 def test_settings_snapshot_carries_passthrough_stall_wait():
     """Regression (id 3365909882): passthrough_stall_wait must be serialized into
     the /prepare settings snapshot so a user-tuned (or 0-to-disable) value is
-    honored on the service-proxied path instead of silently defaulting to 120."""
+    honored on the service-proxied path instead of silently defaulting to 20."""
     import resources.lib.stream_proxy as sp
 
     assert "passthrough_stall_wait" in sp._SETTINGS_SNAPSHOT_KEYS
@@ -12824,7 +12824,7 @@ def test_serve_proxy_closes_without_zero_filling_remainder_when_recovery_exhaust
     # realistic), and the recovery path backs off via waitForAbort on every
     # retry-ladder (2,4,8s), skip-probe (2,4,6,8s) and patient-forward-stall
     # iteration — the stall loop holding the client for the whole
-    # `passthrough_stall_wait` budget (default 120s) before giving up. Two scoped
+    # `passthrough_stall_wait` budget (default 20s) before giving up. Two scoped
     # changes collapse the wall clock to ~0s without altering the path or its
     # assertion:
     #   * override ONLY this monitor's waitForAbort to return False instantly (no
@@ -16331,7 +16331,7 @@ def test_serve_proxy_established_forward_stall_waits_then_completes_on_recovery(
             "zero_fill_budget_enabled": True,
             "retry_ladder_enabled": False,  # isolate the backoff to the new gate
             "send_200_no_range_enabled": False,
-            "passthrough_stall_wait_seconds": 120,
+            "passthrough_stall_wait_seconds": 20,
         },
     }
     handler = _make_handler_with_server(
@@ -16416,7 +16416,7 @@ def test_serve_proxy_pre_bytes_stall_does_not_engage_long_wait():
             "zero_fill_budget_enabled": True,
             "retry_ladder_enabled": False,
             "send_200_no_range_enabled": False,
-            "passthrough_stall_wait_seconds": 120,
+            "passthrough_stall_wait_seconds": 20,
         },
     }
     handler = _make_handler_with_server(
@@ -16489,7 +16489,7 @@ def test_serve_proxy_forward_stall_gives_up_after_budget_exhausted():
             "zero_fill_budget_enabled": True,
             "retry_ladder_enabled": False,
             "send_200_no_range_enabled": False,
-            "passthrough_stall_wait_seconds": 120,
+            "passthrough_stall_wait_seconds": 20,
         },
     }
     handler = _make_handler_with_server(
@@ -16578,7 +16578,7 @@ def test_serve_proxy_forward_stall_kodi_shutdown_is_benign_exit():
             "zero_fill_budget_enabled": True,
             "retry_ladder_enabled": False,  # stall gate is the only waitForAbort site
             "send_200_no_range_enabled": False,
-            "passthrough_stall_wait_seconds": 120,
+            "passthrough_stall_wait_seconds": 20,
         },
     }
     handler = _make_handler_with_server(

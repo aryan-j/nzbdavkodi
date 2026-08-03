@@ -256,7 +256,7 @@ def test_passthrough_stall_wait_setting_present(settings_root):
     setting = _setting_anywhere(settings_root, "passthrough_stall_wait")
     assert setting is not None
     assert setting.get("type") == "integer"
-    assert setting.findtext("default") == "120"
+    assert setting.findtext("default") == "20"
 
 
 def test_no_duplicate_setting_ids(settings_root):

@@ -4414,7 +4414,7 @@ def test_resolve_and_play_passes_settings_snapshot_to_proxy_prepare(
         "send_200_no_range": "false",
         "proxy_convert_subs": "true",
         "readahead_buffer_mb": "256",
-        "passthrough_stall_wait": "120",
+        "passthrough_stall_wait": "20",
     }
 
     def settings_getter(key, default=""):
@@ -4444,7 +4444,7 @@ def test_prepare_direct_playback_retry_reuses_settings_snapshot():
         "send_200_no_range": "false",
         "proxy_convert_subs": "true",
         "readahead_buffer_mb": "256",
-        "passthrough_stall_wait": "120",
+        "passthrough_stall_wait": "20",
     }
     settings_getter = MagicMock(
         side_effect=lambda key, default="": values.get(key, default)
