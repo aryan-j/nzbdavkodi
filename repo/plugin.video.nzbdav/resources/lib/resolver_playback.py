@@ -105,6 +105,9 @@ def _validate_stream_url(url, headers):
         return False
 
 
+_COMPLETED_STREAM_VALIDATION_TIMEOUT = 3
+
+
 def _completed_stream_body_available(url, headers, probe_bytes=65536, timeout=20):
     """Best-effort: can a supposedly-Completed stream serve its mid-file body?
 
@@ -116,11 +119,11 @@ def _completed_stream_body_available(url, headers, probe_bytes=65536, timeout=20
     "The Good, the Bad and the Ugly". A byte-0 check can't catch it (the header
     is present), so this probes an actual byte range from the middle of the file.
 
-    Returns ``False`` ONLY on a definitive failure: the mid-file range GET
-    returns HTTP >= 400 or yields zero body bytes. On any ambiguity — unknown
-    length, a file too small to have a meaningful middle, a timeout, or any
-    other network error — returns ``True`` (fail-open) so a slow-but-valid
-    stream is never blocked from playing.
+    A completed row is expected to be locally readable. Validation therefore
+    uses a short bounded timeout, and a late-body timeout is treated as
+    unavailable rather than handing Kodi a stream that will die on a later
+    seek. This keeps startup responsive while rejecting the stale/incomplete
+    history rows this guard is intended to catch.
 
     Env-gated fault injection: NZBDAV_FAULT_REJECT_COMPLETED forces this to
     return False so the resolver takes the re-download path (which attaches
@@ -132,7 +135,8 @@ def _completed_stream_body_available(url, headers, probe_bytes=65536, timeout=20
     if os.environ.get("NZBDAV_FAULT_REJECT_COMPLETED"):
         return False
 
-    length = _completed_stream_head_length(url, headers, timeout)
+    validation_timeout = min(timeout, _COMPLETED_STREAM_VALIDATION_TIMEOUT)
+    length = _completed_stream_head_length(url, headers, validation_timeout)
     if length is None or length <= probe_bytes * 2:
         # Unknown length, or too small to distinguish a missing "middle" from
         # header/tail — fail open.
@@ -143,7 +147,13 @@ def _completed_stream_body_available(url, headers, probe_bytes=65536, timeout=20
     # misleading "Completed" 206 stream.
     for fraction in (0.5, 0.9):
         if not _completed_stream_midfile_present(
-            url, headers, length, probe_bytes, timeout, start_fraction=fraction
+            url,
+            headers,
+            length,
+            probe_bytes,
+            validation_timeout,
+            start_fraction=fraction,
+            reject_timeout=(fraction >= 0.9),
         ):
             return False
     return True
@@ -174,10 +184,17 @@ def _completed_stream_head_length(url, headers, timeout):
 
 
 def _completed_stream_midfile_present(
-    url, headers, length, probe_bytes, timeout, start_fraction=0.5
+    url,
+    headers,
+    length,
+    probe_bytes,
+    timeout,
+    start_fraction=0.5,
+    reject_timeout=False,
 ):
     """Probe a representative byte range: False only on definitive failure."""
-    from urllib.error import HTTPError
+    import socket
+    from urllib.error import HTTPError, URLError
     from urllib.request import Request, urlopen
 
     from resources.lib.http_util import prefer_ipv4_connections
@@ -200,8 +217,19 @@ def _completed_stream_midfile_present(
         # Definitive: the backend cannot serve the mid-file body (e.g. the
         # 404/500 seen when articles are missing).
         return False
+    except (socket.timeout, TimeoutError):
+        # A completed file should answer the late-body probe promptly. Treat a
+        # late timeout as unavailable so Kodi never receives a stream that can
+        # only fail when the user seeks into the missing tail.
+        return not reject_timeout
+    except URLError as exc:
+        reason = getattr(exc, "reason", None)
+        if reject_timeout and isinstance(reason, (socket.timeout, TimeoutError)):
+            return False
+        return True
     except (OSError, ValueError, _resolver.http.client.HTTPException):
-        # Ambiguous (timeout, connection reset) — fail open.
+        # Connection resets and other non-timeout errors remain ambiguous;
+        # preserve the existing fail-open behavior for those cases.
         return True
 
 
