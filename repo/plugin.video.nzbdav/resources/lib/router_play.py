@@ -256,6 +256,45 @@ def _selection_fallback_loader(selected, results, settings_getter=None):
     )
 
 
+def _selection_retry_candidate_loader(selected, results):
+    """Build a lazy, ordered loader for alternate picker releases.
+
+    Candidate rotation is deliberately separate from the in-play fallback
+    loader.  The latter only admits same-content peers after playback starts;
+    this loader carries the already-filtered provider rows so a terminally
+    failed primary can move to the next ranked release before playback starts.
+    It performs no provider or manifest lookup and never includes a synthetic
+    season-pack row.
+    """
+    if isinstance(selected, dict) and selected.get("_season_pack"):
+        return None
+    selected_link = selected.get("link") if isinstance(selected, dict) else None
+    rows = []
+    seen = set()
+    for row in _provider_rows(results):
+        link = row.get("link")
+        if not link or link == selected_link or link in seen:
+            continue
+        seen.add(link)
+        rows.append(dict(row))
+    if not rows:
+        return None
+
+    def _load_retry_candidates():
+        # Return fresh shallow copies so resolver-side metadata changes never
+        # mutate the picker snapshot or the fallback worker's candidate pool.
+        return [dict(row) for row in rows]
+
+    return _load_retry_candidates
+
+
+def _attach_retry_candidate_loader(resolver_params, selected, results):
+    """Attach the pre-play rotation loader only when an alternate exists."""
+    loader = _selection_retry_candidate_loader(selected, results)
+    if loader is not None:
+        resolver_params["_retry_candidate_loader"] = loader
+
+
 def _extract_search_params(params):
     """Pull the common (search_type, title, year, imdb, tvdb, tmdb_id, season,
     episode) tuple from cleaned route params.
@@ -435,6 +474,7 @@ def _handle_play_auto_select(handle, best, filtered, identity=None):
         "_fallback_candidates": [],
         "_fallback_candidate_loader": _selection_fallback_loader(target, provider_rows),
     }
+    _attach_retry_candidate_loader(resolver_params, target, provider_rows)
     _attach_episode_context(resolver_params, identity or {})
     _attach_nzbget_dupe(resolver_params, target, provider_rows, identity)
     _ensure_nzbget_completed_hint(target)
@@ -777,6 +817,7 @@ def _handle_play_resolve_selection(
         "_fallback_candidates": [],
         "_fallback_candidate_loader": _selection_fallback_loader(target, provider_rows),
     }
+    _attach_retry_candidate_loader(resolver_params, target, provider_rows)
     _attach_episode_context(resolver_params, identity or {})
     _attach_nzbget_dupe(resolver_params, target, provider_rows, identity)
     _apply_completed_job_hint(resolver_params, target, completed_jobs)
@@ -857,6 +898,7 @@ def _handle_search_auto_select(params, best, filtered):
     resolver_params["_fallback_candidate_loader"] = _selection_fallback_loader(
         target, provider_rows
     )
+    _attach_retry_candidate_loader(resolver_params, target, provider_rows)
     _attach_nzbget_dupe(
         resolver_params, target, provider_rows, _identity_from_params(params)
     )
@@ -878,6 +920,7 @@ def _handle_search_resolve_selection(params, selected, filtered, completed_jobs)
     resolver_params["_fallback_candidate_loader"] = _selection_fallback_loader(
         target, provider_rows
     )
+    _attach_retry_candidate_loader(resolver_params, target, provider_rows)
     _attach_nzbget_dupe(
         resolver_params, target, provider_rows, _identity_from_params(params)
     )

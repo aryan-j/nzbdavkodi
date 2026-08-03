@@ -109,14 +109,15 @@ def _submit_and_announce(nzb_url, title, dialog, monitor, poll_ctx):
     """Submit the NZB (with retries) and fire the primary-submitted hook.
 
     Returns nzo_id or None. Extracted verbatim from _poll_until_ready."""
+    submit_kwargs = {
+        "settings_getter": poll_ctx.settings_getter,
+        "selected_indexer": poll_ctx.selected_indexer,
+        "rejected_completed_ids": poll_ctx.rejected_completed_ids,
+    }
+    if poll_ctx.dead is not None:
+        submit_kwargs["dead"] = poll_ctx.dead
     nzo_id = _resolver._submit_nzb_with_retries(
-        nzb_url,
-        title,
-        dialog,
-        monitor,
-        settings_getter=poll_ctx.settings_getter,
-        selected_indexer=poll_ctx.selected_indexer,
-        rejected_completed_ids=poll_ctx.rejected_completed_ids,
+        nzb_url, title, dialog, monitor, **submit_kwargs
     )
     if not nzo_id:
         return None

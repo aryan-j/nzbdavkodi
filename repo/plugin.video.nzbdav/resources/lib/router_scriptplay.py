@@ -323,6 +323,7 @@ def _script_play_auto_select(params, best, filtered):
     resolver_params["_fallback_candidate_loader"] = _router._selection_fallback_loader(
         target, provider_rows, settings_getter=_router._get_script_setting
     )
+    _router._attach_retry_candidate_loader(resolver_params, target, provider_rows)
     completed_job = None
     if not best.get("_season_pack") and not _router._nzbget_mode_enabled(
         _router._get_script_setting
@@ -362,6 +363,7 @@ def _script_play_resolve_selected(params, selected, filtered, completed_jobs):
     resolver_params["_fallback_candidate_loader"] = _router._selection_fallback_loader(
         target, provider_rows, settings_getter=_router._get_script_setting
     )
+    _router._attach_retry_candidate_loader(resolver_params, target, provider_rows)
     resolver_params["_settings_getter"] = _router._get_script_setting
     completed_job = target.get("_completed_job")
     if (

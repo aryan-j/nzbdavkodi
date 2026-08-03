@@ -109,6 +109,7 @@ from resources.lib.router_play import (  # noqa: F401
     _apply_completed_job_hint,
     _attach_episode_context,
     _attach_nzbget_dupe,
+    _attach_retry_candidate_loader,
     _ensure_nzbget_completed_hint,
     _extract_search_params,
     _filtered_or_prompt,
@@ -129,6 +130,7 @@ from resources.lib.router_play import (  # noqa: F401
     _search_with_cache,
     _season_pack_result,
     _selection_fallback_loader,
+    _selection_retry_candidate_loader,
     _selection_target,
 )
 from resources.lib.router_poster import (  # noqa: F401
