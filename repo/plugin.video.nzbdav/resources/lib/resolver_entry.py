@@ -15,6 +15,12 @@ moved name is re-exported from ``resolver``.
 
 import resources.lib.resolver as _resolver  # noqa: F401  pylint: disable=unused-import
 
+# A terminally failed release is usually discovered quickly (for example a
+# missing article), but serially trying an entire filtered provider list can
+# turn one click into a long queue.  Keep the original ranked pick plus three
+# alternates; transient timeouts never enter this rotation.
+_MAX_PRIMARY_CANDIDATE_ATTEMPTS = 4
+
 
 class _ResolveSideEffects:
     """Once-only playback-cleanup and fallback-worker starters shared by
@@ -28,6 +34,7 @@ class _ResolveSideEffects:
         nzb_url,
         dead,
         settings_getter=None,
+        retry_candidate_loader=None,
     ):
         self._params = params
         self._candidates = fallback_candidates
@@ -35,6 +42,17 @@ class _ResolveSideEffects:
         self._nzb_url = nzb_url
         self._dead = dead
         self._settings_getter = settings_getter
+        self._retry_loader = (
+            retry_candidate_loader
+            if retry_candidate_loader is not None
+            else (
+                params.get("_retry_candidate_loader")
+                if isinstance(params, dict)
+                else None
+            )
+        )
+        self._retry_candidates = None
+        self.playback_title = None
         episode_context = (
             params.get("_episode_context") if isinstance(params, dict) else None
         )
@@ -82,6 +100,45 @@ class _ResolveSideEffects:
             )
         return self.fallback_state
 
+    def switch_primary(self, nzb_url, title=None):
+        """Make the current candidate the fallback worker's primary."""
+        self._nzb_url = nzb_url
+        if title:
+            self.playback_title = title
+
+    def reset_failed_attempt(self):
+        """Stop standby work left by a failed candidate before rotating."""
+        if self.fallback_state is not None:
+            _resolver._stop_fallback_submit_worker(
+                self.fallback_state, cancel_submitted=True
+            )
+            self.fallback_state = None
+
+    def retry_candidates(self):
+        """Load ordered alternate releases once, failing closed on loader errors."""
+        if self._retry_candidates is not None:
+            return self._retry_candidates
+        self._retry_candidates = []
+        if not callable(self._retry_loader):
+            return self._retry_candidates
+        try:
+            rows = self._retry_loader()
+        except Exception as error:  # pylint: disable=broad-except
+            _resolver.xbmc.log(
+                "NZB-DAV: Candidate rotation lookup failed: {}".format(error),
+                _resolver.xbmc.LOGDEBUG,
+            )
+            return self._retry_candidates
+        seen = set()
+        for row in rows or []:
+            if not isinstance(row, dict) or not row.get("link"):
+                continue
+            if row["link"] in seen:
+                continue
+            seen.add(row["link"])
+            self._retry_candidates.append(dict(row))
+        return self._retry_candidates
+
     def disable_fallbacks(self):
         """Prevent provider submissions when an existing pack is playable."""
         self._candidates = []
@@ -95,6 +152,69 @@ def _entry_fallback_candidate_loader(params):
     if params.get("_season_pack"):
         return None
     return _resolver._prefetch_fallback_candidate_loader(loader)
+
+
+def _close_failed_attempt_dialog(dialog):
+    """Close a failed candidate's progress dialog before trying its alternate."""
+    if dialog is None:
+        return
+    try:
+        dialog.close()
+    except Exception:  # pylint: disable=broad-except
+        pass
+
+
+def _next_primary_candidate(effects, attempted):
+    """Return the next live provider row, skipping dead/duplicate links."""
+    for candidate in effects.retry_candidates():
+        link = candidate.get("link")
+        if not link or link in attempted or effects._dead.has_url(link):
+            continue
+        attempted.add(link)
+        return candidate
+    return None
+
+
+def _params_for_primary_candidate(base_params, candidate):
+    """Copy route params for an alternate release without stale hints."""
+    params = dict(base_params or {})
+    link = candidate.get("link", "")
+    if "nzburl" in params:
+        params["nzburl"] = link
+    params["title"] = candidate.get("title") or params.get("title", "")
+    params.pop("_season_pack", None)
+    params.pop("_nzbget_completed_job", None)
+    params.pop("_completed_job", None)
+    # A picker hint belongs to the failed release.  Let the alternate perform
+    # its own completed-history lookup, or use its row-specific hint below.
+    params.pop("_completed_job_lookup_done", None)
+    for key in ("_selected_indexer", "_download_pubdate", "_download_size"):
+        params.pop(key, None)
+
+    completed_job = candidate.get("_completed_job")
+    if completed_job:
+        params["_completed_job"] = completed_job
+    indexer = str(candidate.get("indexer", "") or "").strip()
+    if indexer:
+        params["_selected_indexer"] = indexer
+    if candidate.get("pubdate"):
+        params["_download_pubdate"] = candidate["pubdate"]
+    if candidate.get("size"):
+        params["_download_size"] = candidate["size"]
+    return params
+
+
+def _log_primary_rotation(title, attempt, candidate):
+    """Record a redacted, user-useful rotation event."""
+    _resolver.xbmc.log(
+        "NZB-DAV: Candidate rotation attempt {}/{} for '{}' -> '{}'".format(
+            attempt,
+            _MAX_PRIMARY_CANDIDATE_ATTEMPTS,
+            title,
+            candidate.get("title") or "alternate release",
+        ),
+        _resolver.xbmc.LOGINFO,
+    )
 
 
 def _season_pack_reuse(record, episode_context, settings_getter=None):
@@ -146,27 +266,53 @@ def _resolve_acquire_stream(nzb_url, title, params, rejected_completed_ids, effe
         return None, None, None
     if not nzb_url:
         return None, None, None
-    selected_indexer = params.get("_selected_indexer", "")
-    picker_completed_lookup_done = _resolver._picker_completed_lookup_done(params)
-    picker_kwargs = {
-        "on_existing_completed": effects.start_cleanup_once,
-        "rejected_completed_ids": rejected_completed_ids,
-    }
-    if effects.episode_context is not None:
-        picker_kwargs["episode_context"] = effects.episode_context
-    completed_stream = _resolver._picker_completed_stream(
-        title, params, **picker_kwargs
-    )
-    if completed_stream is not None:
-        stream_url, stream_headers = completed_stream
-        return stream_url, stream_headers, None
-    return _resolver._resolve_submit_and_poll(
-        nzb_url,
-        title,
-        params,
-        picker_completed_lookup_done,
-        effects.poll_context(selected_indexer, rejected_completed_ids),
-    )
+    current_url = nzb_url
+    current_title = title
+    current_params = params
+    attempted = {current_url}
+    for attempt in range(1, _MAX_PRIMARY_CANDIDATE_ATTEMPTS + 1):
+        effects.switch_primary(current_url, current_title)
+        selected_indexer = current_params.get("_selected_indexer", "")
+        picker_completed_lookup_done = _resolver._picker_completed_lookup_done(
+            current_params
+        )
+        picker_kwargs = {
+            "on_existing_completed": effects.start_cleanup_once,
+            "rejected_completed_ids": rejected_completed_ids,
+        }
+        if effects.episode_context is not None:
+            picker_kwargs["episode_context"] = effects.episode_context
+        completed_stream = _resolver._picker_completed_stream(
+            current_title, current_params, **picker_kwargs
+        )
+        if completed_stream is not None:
+            effects.playback_title = current_title
+            stream_url, stream_headers = completed_stream
+            return stream_url, stream_headers, None
+        stream_url, stream_headers, dialog = _resolver._resolve_submit_and_poll(
+            current_url,
+            current_title,
+            current_params,
+            picker_completed_lookup_done,
+            effects.poll_context(selected_indexer, rejected_completed_ids),
+        )
+        if stream_url:
+            effects.playback_title = current_title
+            return stream_url, stream_headers, dialog
+        _close_failed_attempt_dialog(dialog)
+        if not effects._dead.has_url(current_url):
+            return None, None, None
+        if attempt >= _MAX_PRIMARY_CANDIDATE_ATTEMPTS:
+            return None, None, None
+        candidate = _next_primary_candidate(effects, attempted)
+        if candidate is None:
+            return None, None, None
+        effects.reset_failed_attempt()
+        current_params = _params_for_primary_candidate(params, candidate)
+        current_url = candidate["link"]
+        current_title = current_params["title"]
+        _log_primary_rotation(current_title, attempt + 1, candidate)
+    return None, None, None
 
 
 def _resolve_and_play_make_effects(params, resolve_params, nzb_url, settings_getter):
@@ -210,34 +356,60 @@ def _resolve_and_play_acquire_stream(
         return None, None, None
     if not nzb_url:
         return None, None, None
-    selected_indexer = resolve_params.get("_selected_indexer", "")
-    picker_completed_lookup_done = _resolver._picker_completed_lookup_done(
-        resolve_params
-    )
+    current_url = nzb_url
+    current_title = title
+    current_params = resolve_params
+    attempted = {current_url}
     # One rejected-id set per resolve attempt, shared so a Completed row the
-    # picker body probe rejects is honored by the submit/poll paths.
+    # picker body probe rejects is honored by every submit/poll rotation.
     rejected_completed_ids = set()
-    picker_kwargs = {
-        "on_existing_completed": effects.start_cleanup_once,
-        "settings_getter": settings_getter,
-        "rejected_completed_ids": rejected_completed_ids,
-    }
-    if effects.episode_context is not None:
-        picker_kwargs["episode_context"] = effects.episode_context
-    completed_stream = _resolver._picker_completed_stream(
-        title, resolve_params, **picker_kwargs
-    )
-    _resolver._resolve_stage("picker completed stream checked")
-    if completed_stream is not None:
-        stream_url, stream_headers = completed_stream
-        return stream_url, stream_headers, None
-    return _resolver._resolve_and_play_submit_and_poll(
-        nzb_url,
-        title,
-        resolve_params,
-        picker_completed_lookup_done,
-        effects.poll_context(selected_indexer, rejected_completed_ids),
-    )
+    for attempt in range(1, _MAX_PRIMARY_CANDIDATE_ATTEMPTS + 1):
+        effects.switch_primary(current_url, current_title)
+        selected_indexer = current_params.get("_selected_indexer", "")
+        picker_completed_lookup_done = _resolver._picker_completed_lookup_done(
+            current_params
+        )
+        picker_kwargs = {
+            "on_existing_completed": effects.start_cleanup_once,
+            "settings_getter": settings_getter,
+            "rejected_completed_ids": rejected_completed_ids,
+        }
+        if effects.episode_context is not None:
+            picker_kwargs["episode_context"] = effects.episode_context
+        completed_stream = _resolver._picker_completed_stream(
+            current_title, current_params, **picker_kwargs
+        )
+        _resolver._resolve_stage("picker completed stream checked")
+        if completed_stream is not None:
+            effects.playback_title = current_title
+            stream_url, stream_headers = completed_stream
+            return stream_url, stream_headers, None
+        stream_url, stream_headers, dialog = (
+            _resolver._resolve_and_play_submit_and_poll(
+                current_url,
+                current_title,
+                current_params,
+                picker_completed_lookup_done,
+                effects.poll_context(selected_indexer, rejected_completed_ids),
+            )
+        )
+        if stream_url:
+            effects.playback_title = current_title
+            return stream_url, stream_headers, dialog
+        _close_failed_attempt_dialog(dialog)
+        if not effects._dead.has_url(current_url):
+            return None, None, None
+        if attempt >= _MAX_PRIMARY_CANDIDATE_ATTEMPTS:
+            return None, None, None
+        candidate = _next_primary_candidate(effects, attempted)
+        if candidate is None:
+            return None, None, None
+        effects.reset_failed_attempt()
+        current_params = _params_for_primary_candidate(resolve_params, candidate)
+        current_url = candidate["link"]
+        current_title = current_params["title"]
+        _log_primary_rotation(current_title, attempt + 1, candidate)
+    return None, None, None
 
 
 def resolve(handle, params):
@@ -287,6 +459,8 @@ def resolve(handle, params):
         stream_url, stream_headers, dialog = _resolve_acquire_stream(
             nzb_url, title, params, rejected_completed_ids, effects
         )
+        if effects.playback_title:
+            params["title"] = effects.playback_title
         dialog = _resolver._resolve_finish_or_reject(
             handle,
             params,
@@ -347,8 +521,9 @@ def resolve_and_play(nzb_url, title, params=None):
         stream_url, stream_headers, dialog = _resolve_and_play_acquire_stream(
             nzb_url, title, resolve_params, settings_getter, effects
         )
+        playback_title = effects.playback_title or title
         dialog = _resolver._resolve_and_play_finish_or_stop(
-            _resolver._resume_params_with_title(resolve_params, title),
+            _resolver._resume_params_with_title(resolve_params, playback_title),
             (stream_url, stream_headers, effects._dead),
             (effects.fallback_state, effects.start_fallback_after_primary),
             settings_getter,

@@ -615,7 +615,7 @@ def _report_all_submit_attempts_failed(
     _resolver.xbmcgui.Dialog().ok(_resolver._addon_name(), _resolver._string(30098))
 
 
-def _submit_nzb_with_retries(
+def _submit_nzb_with_retries(  # pylint: disable=too-many-arguments,too-many-positional-arguments
     nzb_url,
     title,
     dialog,
@@ -624,6 +624,7 @@ def _submit_nzb_with_retries(
     settings_getter=None,
     selected_indexer=None,
     rejected_completed_ids=None,
+    dead=None,
 ):
     """Submit an NZB with the existing retry and error-dialog behavior."""
     _resolver.xbmc.log(
@@ -656,6 +657,14 @@ def _submit_nzb_with_retries(
 
         if submit_error:
             last_submit_error = submit_error
+            if dead is not None and _resolver.is_provably_dead_submit_error(
+                submit_error
+            ):
+                # A submit rejection such as missing articles is terminal for
+                # this release even when nzbdav never creates a queue row.
+                # Record the URL so the resolver can rotate to the next ranked
+                # provider result instead of retrying the same doomed NZB.
+                dead.add(nzb_url=nzb_url)
             error_ctx["attempt_label"] = "{}/{}".format(attempt, max_submit_retries)
             action, value = _resolver._handle_submit_attempt_error(
                 submit_error, error_ctx

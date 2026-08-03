@@ -2784,6 +2784,7 @@ def test_handle_script_play_uses_picker_without_plugin_handle_resolution(
     resolver_params = dict(kwargs["params"])
     assert callable(resolver_params.pop("_settings_getter"))
     assert callable(resolver_params.pop("_fallback_candidate_loader"))
+    assert callable(resolver_params.pop("_retry_candidate_loader"))
     _, tag_kwargs = mock_tag.call_args
     assert tag_kwargs["settings_getter"] is not None
     assert resolver_params == {
@@ -3358,6 +3359,7 @@ def test_handle_script_play_auto_select_marks_completed_lookup_done(
     resolver_params = dict(mock_resolve_and_play.call_args.kwargs["params"])
     assert callable(resolver_params.pop("_settings_getter"))
     assert callable(resolver_params.pop("_fallback_candidate_loader"))
+    assert callable(resolver_params.pop("_retry_candidate_loader"))
     assert resolver_params == {
         "type": "movie",
         "title": "The Odyssey",
@@ -3469,6 +3471,7 @@ def test_handle_search_picker_fetches_fallbacks_after_selection(
     assert args == (primary["link"], primary["title"])
     resolver_params = dict(kwargs["params"])
     loader = resolver_params.pop("_fallback_candidate_loader")
+    assert callable(resolver_params.pop("_retry_candidate_loader"))
     assert callable(loader)
     assert resolver_params == {
         "type": "movie",
