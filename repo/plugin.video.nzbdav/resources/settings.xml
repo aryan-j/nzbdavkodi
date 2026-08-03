@@ -1109,7 +1109,7 @@
 				</setting>
 				<setting id="passthrough_stall_wait" type="integer" label="30206" help="30353">
 					<level>0</level>
-					<default>120</default>
+					<default>20</default>
 					<control type="edit" format="integer">
 						<heading>30206</heading>
 					</control>

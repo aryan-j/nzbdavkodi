@@ -137,7 +137,16 @@ def _completed_stream_body_available(url, headers, probe_bytes=65536, timeout=20
         # Unknown length, or too small to distinguish a missing "middle" from
         # header/tail — fail open.
         return True
-    return _completed_stream_midfile_present(url, headers, length, probe_bytes, timeout)
+    # A single midpoint probe can pass while a still-incomplete download has
+    # only its header and early body available. Probe a late-body range too so
+    # a high-water mark near the tail is rejected before Kodi receives a
+    # misleading "Completed" 206 stream.
+    for fraction in (0.5, 0.9):
+        if not _completed_stream_midfile_present(
+            url, headers, length, probe_bytes, timeout, start_fraction=fraction
+        ):
+            return False
+    return True
 
 
 def _add_request_headers(req, headers):
@@ -164,14 +173,16 @@ def _completed_stream_head_length(url, headers, timeout):
         return None
 
 
-def _completed_stream_midfile_present(url, headers, length, probe_bytes, timeout):
-    """Probe a mid-file byte range: False only on a definitive empty/4xx body."""
+def _completed_stream_midfile_present(
+    url, headers, length, probe_bytes, timeout, start_fraction=0.5
+):
+    """Probe a representative byte range: False only on definitive failure."""
     from urllib.error import HTTPError
     from urllib.request import Request, urlopen
 
     from resources.lib.http_util import prefer_ipv4_connections
 
-    start = length // 2
+    start = min(max(int(length * start_fraction), 0), max(length - probe_bytes, 0))
     end = min(start + probe_bytes - 1, length - 1)
     try:
         req = Request(url)

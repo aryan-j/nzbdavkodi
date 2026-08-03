@@ -1055,11 +1055,32 @@ def test_completed_job_stream_streams_when_midfile_body_available(mock_find_stre
     )
     head = _probe_response(content_length=85_000_000)
     midfile_ok = _probe_response(code=206, body=b"\x00")
+    tail_ok = _probe_response(code=206, body=b"\x00")
 
-    with patch("urllib.request.urlopen", side_effect=[head, midfile_ok]):
+    with patch("urllib.request.urlopen", side_effect=[head, midfile_ok, tail_ok]):
         stream = _completed_job_stream("movie.mkv", _COMPLETED_JOB)
 
     assert stream == ("http://webdav/movie.mkv", {"Authorization": "Basic x"})
+
+
+@patch("resources.lib.resolver._find_video_stream_for_folder")
+def test_completed_job_stream_rejects_unavailable_tail_body(mock_find_stream):
+    """A midpoint hit must not hide an unavailable high-water tail."""
+    from urllib.error import HTTPError
+
+    mock_find_stream.return_value = (
+        "/content/uncategorized/movie/movie.mkv",
+        "http://webdav/movie.mkv",
+        {"Authorization": "Basic x"},
+    )
+    head = _probe_response(content_length=85_000_000)
+    midfile_ok = _probe_response(code=206, body=b"\x00")
+    tail_404 = HTTPError("http://webdav/movie.mkv", 404, "Not Found", {}, None)
+
+    with patch("urllib.request.urlopen", side_effect=[head, midfile_ok, tail_404]):
+        stream = _completed_job_stream("movie.mkv", _COMPLETED_JOB)
+
+    assert stream is None
 
 
 # ---------------------------------------------------------------------------
@@ -4414,7 +4435,7 @@ def test_resolve_and_play_passes_settings_snapshot_to_proxy_prepare(
         "send_200_no_range": "false",
         "proxy_convert_subs": "true",
         "readahead_buffer_mb": "256",
-        "passthrough_stall_wait": "120",
+        "passthrough_stall_wait": "20",
     }
 
     def settings_getter(key, default=""):
@@ -4444,7 +4465,7 @@ def test_prepare_direct_playback_retry_reuses_settings_snapshot():
         "send_200_no_range": "false",
         "proxy_convert_subs": "true",
         "readahead_buffer_mb": "256",
-        "passthrough_stall_wait": "120",
+        "passthrough_stall_wait": "20",
     }
     settings_getter = MagicMock(
         side_effect=lambda key, default="": values.get(key, default)
