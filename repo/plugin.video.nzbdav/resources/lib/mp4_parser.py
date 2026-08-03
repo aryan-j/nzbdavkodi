@@ -13,7 +13,7 @@ import threading
 from collections import OrderedDict
 from urllib.request import Request, urlopen
 
-from resources.lib.http_util import HTTP_USER_AGENT
+from resources.lib.http_util import HTTP_USER_AGENT, prefer_ipv4_connections
 
 
 def read_box_header(data, offset):
@@ -290,15 +290,16 @@ def _http_range(url, start, end, auth_header=None):
     req.add_header("Range", "bytes={}-{}".format(start, end))
     if auth_header:
         req.add_header("Authorization", auth_header)
-    # nosemgrep
-    with urlopen(  # nosec B310 — URL from user-configured WebDAV
-        req, timeout=30
-    ) as resp:
-        status = _resp_status(resp)
-        if status != 206:
-            raise ValueError("range request returned status {}".format(status))
-        _check_content_range(resp, start, end)
-        data = resp.read(expected_len + 1)
+    with prefer_ipv4_connections():
+        # nosemgrep
+        with urlopen(  # nosec B310 — URL from user-configured WebDAV
+            req, timeout=30
+        ) as resp:
+            status = _resp_status(resp)
+            if status != 206:
+                raise ValueError("range request returned status {}".format(status))
+            _check_content_range(resp, start, end)
+            data = resp.read(expected_len + 1)
         if len(data) != expected_len:
             raise ValueError(
                 "range request returned {} bytes, expected {}".format(
