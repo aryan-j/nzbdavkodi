@@ -119,6 +119,48 @@ def test_resolve_does_not_rotate_transient_candidate_failure():
     retry_loader.assert_not_called()
 
 
+def test_resolve_skips_rejected_completed_copy_before_resubmit():
+    from resources.lib import resolver
+    from resources.lib.dead_candidates import DeadCandidates
+
+    primary = "http://indexer/stale-completed"
+    alternate = {"title": "Fresh.Release", "link": "http://indexer/fresh"}
+    retry_loader = MagicMock(return_value=[alternate])
+    effects = resolver._ResolveSideEffects(
+        {"title": "Stale.Release", "_retry_candidate_loader": retry_loader},
+        [],
+        None,
+        primary,
+        DeadCandidates(),
+    )
+    calls = []
+
+    def picker(_title, _params, **kwargs):
+        rejected = kwargs["rejected_completed_ids"]
+        if not rejected:
+            rejected.add("stale-history-id")
+        return None
+
+    def submit(url, title, *_args, **_kwargs):
+        calls.append((url, title))
+        return "http://webdav/fresh.mkv", {}, MagicMock()
+
+    with patch(
+        "resources.lib.resolver._picker_completed_stream", side_effect=picker
+    ), patch("resources.lib.resolver._resolve_submit_and_poll", side_effect=submit):
+        result = resolver._resolve_acquire_stream(
+            primary,
+            "Stale.Release",
+            {"title": "Stale.Release", "_retry_candidate_loader": retry_loader},
+            set(),
+            effects,
+        )
+
+    assert result[0] == "http://webdav/fresh.mkv"
+    assert calls == [(alternate["link"], alternate["title"])]
+    assert effects._dead.has_url(primary)
+
+
 def test_resolve_and_play_rotates_terminal_failure_for_script_route():
     from resources.lib import resolver
     from resources.lib.dead_candidates import DeadCandidates

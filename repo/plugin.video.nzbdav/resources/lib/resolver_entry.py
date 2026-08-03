@@ -282,6 +282,7 @@ def _resolve_acquire_stream(nzb_url, title, params, rejected_completed_ids, effe
         }
         if effects.episode_context is not None:
             picker_kwargs["episode_context"] = effects.episode_context
+        rejected_before_picker = set(rejected_completed_ids)
         completed_stream = _resolver._picker_completed_stream(
             current_title, current_params, **picker_kwargs
         )
@@ -289,6 +290,29 @@ def _resolve_acquire_stream(nzb_url, title, params, rejected_completed_ids, effe
             effects.playback_title = current_title
             stream_url, stream_headers = completed_stream
             return stream_url, stream_headers, None
+        # A completed-history body probe can reject a stale copy before any
+        # submit occurs. Do not re-submit that same release: nzbdav keeps its
+        # old mount path, so the duplicate path fails at database finalization
+        # instead of reaching the next provider candidate. Mark it terminal
+        # for this playback and rotate immediately when an alternate exists.
+        if len(rejected_completed_ids) > len(rejected_before_picker):
+            effects._dead.add(nzb_url=current_url)
+            _resolver.xbmc.log(
+                "NZB-DAV: Skipping rejected completed release '{}' before "
+                "re-submit; rotating candidate".format(current_title),
+                _resolver.xbmc.LOGINFO,
+            )
+            if attempt >= _MAX_PRIMARY_CANDIDATE_ATTEMPTS:
+                return None, None, None
+            candidate = _next_primary_candidate(effects, attempted)
+            if candidate is None:
+                return None, None, None
+            effects.reset_failed_attempt()
+            current_params = _params_for_primary_candidate(params, candidate)
+            current_url = candidate["link"]
+            current_title = current_params["title"]
+            _log_primary_rotation(current_title, attempt + 1, candidate)
+            continue
         stream_url, stream_headers, dialog = _resolver._resolve_submit_and_poll(
             current_url,
             current_title,
@@ -376,6 +400,7 @@ def _resolve_and_play_acquire_stream(
         }
         if effects.episode_context is not None:
             picker_kwargs["episode_context"] = effects.episode_context
+        rejected_before_picker = set(rejected_completed_ids)
         completed_stream = _resolver._picker_completed_stream(
             current_title, current_params, **picker_kwargs
         )
@@ -384,6 +409,27 @@ def _resolve_and_play_acquire_stream(
             effects.playback_title = current_title
             stream_url, stream_headers = completed_stream
             return stream_url, stream_headers, None
+        # Keep the handle-less/script route in lockstep with resolve(): a
+        # rejected completed copy must never be submitted again while its old
+        # nzbdav mount path still exists.
+        if len(rejected_completed_ids) > len(rejected_before_picker):
+            effects._dead.add(nzb_url=current_url)
+            _resolver.xbmc.log(
+                "NZB-DAV: Skipping rejected completed release '{}' before "
+                "re-submit; rotating candidate".format(current_title),
+                _resolver.xbmc.LOGINFO,
+            )
+            if attempt >= _MAX_PRIMARY_CANDIDATE_ATTEMPTS:
+                return None, None, None
+            candidate = _next_primary_candidate(effects, attempted)
+            if candidate is None:
+                return None, None, None
+            effects.reset_failed_attempt()
+            current_params = _params_for_primary_candidate(resolve_params, candidate)
+            current_url = candidate["link"]
+            current_title = current_params["title"]
+            _log_primary_rotation(current_title, attempt + 1, candidate)
+            continue
         stream_url, stream_headers, dialog = (
             _resolver._resolve_and_play_submit_and_poll(
                 current_url,
