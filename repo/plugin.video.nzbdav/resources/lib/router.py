@@ -423,6 +423,28 @@ def _script_completed_job_for_selection(selected):
         return None
 
 
+def _script_completed_job_from_snapshot(selected, completed_jobs):
+    """Return a validated RunScript completed hint from a history snapshot.
+
+    The snapshot is only authoritative when its caller recorded a successful
+    history lookup.  The same size and post-date gates as the per-selection
+    lookup are retained so a same-name repost cannot adopt the wrong stream.
+    """
+    if not _completed_lookup_was_done(completed_jobs):
+        return None
+    title = selected.get("title", "") if isinstance(selected, dict) else ""
+    if not title:
+        return None
+    job = completed_jobs.get(title)
+    if (
+        job
+        and _completed_job_matches_result(selected, job)
+        and _result_pubdate_consistent_with_downloads(selected)
+    ):
+        return job
+    return None
+
+
 def _search_all_providers(query, settings_getter=None):
     """
     Search enabled indexer providers and return combined, deduplicated results.
@@ -527,7 +549,7 @@ def _collect_provider_outcomes(provider_outcomes):
     return deduped, None
 
 
-def _tag_available(results, settings_getter=None):
+def _tag_available(results, settings_getter=None, completed_jobs=None):
     """
     Mark result entries that already exist in the active download backend by
     setting the `_available` flag.
@@ -547,7 +569,11 @@ def _tag_available(results, settings_getter=None):
         return {}
     if _nzbget_mode_enabled(settings_getter):
         return _tag_available_nzbget(results, settings_getter=settings_getter)
-    completed = get_completed_jobs(settings_getter=settings_getter)
+    completed = (
+        get_completed_jobs(settings_getter=settings_getter)
+        if completed_jobs is None
+        else completed_jobs
+    )
     if not completed:
         return completed
     for result in results:

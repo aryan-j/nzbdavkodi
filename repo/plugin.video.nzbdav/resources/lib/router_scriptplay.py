@@ -13,8 +13,71 @@ _router`` so the suite's ``@patch("resources.lib.router.<name>")`` decorators
 keep resolving and no top-level import cycle is introduced.
 """
 
+import threading
+
 import xbmc
 import xbmcgui
+
+_PREFETCH_NOT_READY = object()
+
+
+class _CompletedHistoryPrefetch:
+    """Best-effort daemon history read that overlaps provider search."""
+
+    def __init__(self, router_module):
+        self._router = router_module
+        self._done = threading.Event()
+        self._jobs = {}
+        self._thread = threading.Thread(
+            target=self._run,
+            name="nzbdav-completed-history-prefetch",
+            daemon=True,
+        )
+
+    def start(self):
+        """Start the read-only prefetch and return this handle."""
+        try:
+            self._thread.start()
+        except RuntimeError:
+            # Keep the normal fail-soft behavior if thread creation is refused.
+            self._run()
+        return self
+
+    def _run(self):
+        try:
+            from resources.lib.nzbdav_api import get_completed_jobs
+
+            self._jobs = get_completed_jobs(
+                settings_getter=self._router._get_script_setting
+            )
+        except Exception as error:  # pylint: disable=broad-except
+            xbmc.log(
+                "NZB-DAV: completed-history prefetch failed: {}".format(error),
+                xbmc.LOGDEBUG,
+            )
+            self._jobs = {}
+        finally:
+            self._done.set()
+
+    def result_if_ready(self):
+        """Return the snapshot without delaying playback, or a sentinel."""
+        if not self._done.is_set():
+            return _PREFETCH_NOT_READY
+        return self._jobs
+
+    def result(self):
+        """Wait only where the existing picker path already waited."""
+        self._done.wait()
+        return self._jobs
+
+
+def _start_completed_history_prefetch(router_module):
+    """Start a history prefetch only for the configured NZB-DAV backend."""
+    if router_module._nzbget_mode_enabled(router_module._get_script_setting):
+        return None
+    if not router_module._get_script_setting("nzbdav_url", "").strip():
+        return None
+    return _CompletedHistoryPrefetch(router_module).start()
 
 
 def _script_play_recover_episode_info(params, title, season, episode):
@@ -174,6 +237,7 @@ def _script_play_search_filter_tag(
     """
     import resources.lib.router as _router
 
+    completed_prefetch = _start_completed_history_prefetch(_router)
     # The indexer search + filtering below can take several seconds; with no
     # on-screen indicator the player looks frozen/crashed. Show a NON-modal
     # background progress dialog (see _open_loading_dialog — the modal
@@ -192,14 +256,26 @@ def _script_play_search_filter_tag(
         if results is None:
             return None
         return _script_play_filter_autoselect_tag(
-            loading, params, results, title, notify, pack_result=pack_result
+            loading,
+            params,
+            results,
+            title,
+            notify,
+            pack_result=pack_result,
+            completed_prefetch=completed_prefetch,
         )
     finally:
         _router._close_loading_dialog(loading)
 
 
 def _script_play_filter_autoselect_tag(
-    loading, params, results, title, notify, pack_result=None
+    loading,
+    params,
+    results,
+    title,
+    notify,
+    pack_result=None,
+    completed_prefetch=None,
 ):
     """Filter, optionally auto-play, and tag for the RunScript flow.
 
@@ -240,10 +316,17 @@ def _script_play_filter_autoselect_tag(
     ):
         # resolve_and_play blocks on the download; drop the indicator first.
         _router._close_loading_dialog(loading)
-        _script_play_auto_select(params, filtered[0], filtered)
+        _script_play_auto_select(
+            params,
+            filtered[0],
+            filtered,
+            completed_prefetch=completed_prefetch,
+        )
         return None
 
-    completed_jobs = _script_play_completed_jobs(_router, filtered)
+    completed_jobs = _script_play_completed_jobs(
+        _router, filtered, completed_prefetch=completed_prefetch
+    )
     return filtered, total_count, completed_jobs
 
 
@@ -260,10 +343,15 @@ def _script_play_available_rows(
     return [] if pack_result is not None else None
 
 
-def _script_play_completed_jobs(router_module, filtered):
+def _script_play_completed_jobs(router_module, filtered, completed_prefetch=None):
     """Tag ordinary provider rows while leaving a pack-only picker untouched."""
     providers = router_module._provider_rows(filtered)
-    return _script_play_tag_available(providers) if providers else None
+    if not providers:
+        return None
+    completed_jobs = (
+        completed_prefetch.result() if completed_prefetch is not None else None
+    )
+    return _script_play_tag_available(providers, completed_jobs=completed_jobs)
 
 
 def _script_play_filtered_or_prompt(loading, all_parsed, title, notify):
@@ -289,14 +377,15 @@ def _script_play_filtered_or_prompt(loading, all_parsed, title, notify):
     return None
 
 
-def _script_play_tag_available(filtered):
+def _script_play_tag_available(filtered, completed_jobs=None):
     """Tag already-downloaded results for the RunScript flow (fail-soft)."""
     import resources.lib.router as _router
 
     try:
-        completed_jobs = _router._tag_available(
-            filtered, settings_getter=_router._get_script_setting
-        )
+        kwargs = {"settings_getter": _router._get_script_setting}
+        if completed_jobs is not None:
+            kwargs["completed_jobs"] = completed_jobs
+        completed_jobs = _router._tag_available(filtered, **kwargs)
         _router._script_play_stage("tag available done")
         return completed_jobs
     except Exception as error:  # pylint: disable=broad-except
@@ -312,7 +401,7 @@ def _script_play_tag_available(filtered):
         return None
 
 
-def _script_play_auto_select(params, best, filtered):
+def _script_play_auto_select(params, best, filtered, completed_prefetch=None):
     """Build resolver params for the auto-selected best release and play it."""
     import resources.lib.router as _router
     from resources.lib.resolver import resolve_and_play
@@ -331,7 +420,23 @@ def _script_play_auto_select(params, best, filtered):
         # In NZBGet mode the nzbdav completed-history hint is dead weight
         # (resolve_and_play delegates to NZBGet before reading it) — skip the
         # lookup instead of stalling on a stale nzbdav config.
-        completed_job = _router._script_completed_job_for_selection(target)
+        completed_job = None
+        snapshot = (
+            completed_prefetch.result_if_ready()
+            if completed_prefetch is not None
+            else _PREFETCH_NOT_READY
+        )
+        if snapshot is not _PREFETCH_NOT_READY:
+            completed_job = _router._script_completed_job_from_snapshot(
+                target, snapshot
+            )
+        if completed_job is None:
+            # A snapshot miss or failure must not suppress the existing exact
+            # lookup: the broad history page is bounded and may omit an older
+            # same-name entry that the search endpoint can still find.
+            # Preserve the old bounded lookup when the probe is still in flight;
+            # never wait for the prefetch on the playback path.
+            completed_job = _router._script_completed_job_for_selection(target)
     if completed_job:
         resolver_params["_completed_job"] = completed_job
     else:

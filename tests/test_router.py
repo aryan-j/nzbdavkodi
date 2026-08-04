@@ -620,6 +620,47 @@ def test_get_script_setting_reads_translated_profile_settings(tmp_path):
             assert router._get_script_setting("hydra_url", "") == "http://hydra:5076"
 
 
+def test_completed_history_prefetch_is_daemon_and_uses_script_settings():
+    from resources.lib import router_scriptplay
+
+    router_module = MagicMock()
+    router_module._nzbget_mode_enabled.return_value = False
+    router_module._get_script_setting.side_effect = lambda key, default="": {
+        "nzbdav_url": "http://nzbdav:3000",
+    }.get(key, default)
+    completed = {"Movie.mkv": {"status": "Completed"}}
+
+    with patch(
+        "resources.lib.nzbdav_api.get_completed_jobs", return_value=completed
+    ) as get_completed:
+        prefetch = router_scriptplay._start_completed_history_prefetch(router_module)
+        assert prefetch.result() is completed
+        assert prefetch._thread.daemon is True
+
+    get_completed.assert_called_once_with(
+        settings_getter=router_module._get_script_setting
+    )
+
+
+def test_tag_available_reuses_supplied_completed_snapshot():
+    from resources.lib.router import _tag_available
+
+    completed_job = {
+        "status": "Completed",
+        "storage": "/mnt/nzbdav/completed-symlinks/uncategorized/Movie.mkv",
+        "name": "Movie.mkv",
+        "nzo_id": "SABnzbd_nzo_done",
+    }
+    results = [{"title": "Movie.mkv", "link": "http://hydra/nzb/movie"}]
+
+    with patch("resources.lib.router.get_completed_jobs") as get_completed:
+        _tag_available(results, completed_jobs={"Movie.mkv": completed_job})
+
+    get_completed.assert_not_called()
+    assert results[0]["_available"] is True
+    assert results[0]["_completed_job"] == completed_job
+
+
 # --- _safe_resolve_handle + action route handle-resolution tests ---
 #
 # Action routes (install_player, clear_cache, settings, configure_*,
