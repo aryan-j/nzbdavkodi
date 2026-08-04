@@ -102,6 +102,10 @@ def _read_json(path, empty_value, warning):
     try:
         with open(path, "r", encoding="utf-8") as handle:
             return json.load(handle)
+    except FileNotFoundError:
+        # The dynamic store is optional: legacy settings.xml indexers are
+        # still valid when the manager has never created indexers.json.
+        return empty_value
     except _READ_ERRORS:
         xbmc.log(warning, xbmc.LOGWARNING)
         return empty_value

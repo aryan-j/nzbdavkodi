@@ -2,6 +2,7 @@
 # Copyright (C) 2026 nzbdav contributors
 
 import json
+from unittest.mock import patch
 
 from resources.lib.indexer_store import (
     load_indexers,
@@ -55,7 +56,10 @@ def test_normalize_indexer_normalizes_caps_collections():
 
 
 def test_load_indexers_missing_file_returns_empty(tmp_path):
-    assert load_indexers(str(tmp_path / "missing.json")) == []
+    with patch("resources.lib.indexer_store.xbmc.log") as log:
+        assert load_indexers(str(tmp_path / "missing.json")) == []
+
+    log.assert_not_called()
 
 
 def test_load_indexers_corrupt_json_returns_empty(tmp_path):
